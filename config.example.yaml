@@ -1,0 +1,41 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# napari-slic annotation config
+# Copy this file to your image folder (or anywhere) and pass it with:
+#   uv run annotator.py     image.png   --config config.yaml
+#   uv run batch_annotator.py my_folder --config config.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Pixels per superpixel — smaller = more (finer) superpixels.
+cell_size: 550
+
+layers:
+  # Each layer gets its own annotation pass and its own exported mask.
+  # You can add, remove, or rename layers freely.
+  # class id 0 is always treated as "background" (transparent overlay).
+
+  - name: borders
+    classes:
+      - id: 0
+        label: Background
+        color: [255, 255, 255]
+      - id: 1
+        label: Flat Wound Border
+        color: [12, 80, 155]       # blue
+      - id: 2
+        label: Punched Out Border
+        color: [228, 183, 229]     # lilac
+
+  - name: tissues
+    classes:
+      - id: 0
+        label: Background
+        color: [255, 255, 255]
+      - id: 3
+        label: Granulation
+        color: [238, 83, 0]        # orange
+      - id: 4
+        label: Slough
+        color: [0, 157, 99]        # green
+      - id: 5
+        label: Necrosis
+        color: [0, 0, 0]           # black
