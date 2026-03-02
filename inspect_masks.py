@@ -10,6 +10,7 @@ class IDs, min/max, and saves a side-by-side RGB reconstruction next to each
 """
 
 import argparse
+import os
 from pathlib import Path
 
 import numpy as np
@@ -75,7 +76,7 @@ def main() -> None:
                         help="YAML config file (for palette). Uses built-in defaults if omitted.")
     args = parser.parse_args()
 
-    base_dir = Path(args.test_dir).expanduser().resolve()
+    base_dir = Path(os.path.normpath(os.path.abspath(os.path.expanduser(args.test_dir))))
     test_dir = base_dir / "masks"
     if not test_dir.is_dir():
         print(f"No 'masks' folder found inside {base_dir}")

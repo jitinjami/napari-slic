@@ -21,6 +21,7 @@ Keyboard shortcuts:
 """
 
 import argparse
+import os
 from pathlib import Path
 
 import napari
@@ -142,14 +143,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Napari batch superpixel annotation tool"
     )
-    parser.add_argument("folder", help="Folder containing images to annotate")
+    parser.add_argument("folder", nargs="?", default="./test/",
+                        help="Folder containing images to annotate (default: current directory)")
     parser.add_argument("--cell-size", type=int, default=None,
                         help="Pixels per superpixel (default: 550 or from config)")
     parser.add_argument("--config", default=None,
                         help="Path to a YAML config file (classes, colors, cell_size)")
     args = parser.parse_args()
 
-    folder = Path(args.folder).expanduser().resolve()
+    folder = Path(os.path.normpath(os.path.abspath(os.path.expanduser(args.folder))))
     if not folder.is_dir():
         print(f"Not a directory: {folder}")
         raise SystemExit(1)
