@@ -7,11 +7,12 @@ requires-python = ">=3.10"
 
 dependencies = [
     "napari>=0.5.0",
-    "pyside6>=6.5",          # Qt backend with macOS/arm64 wheels (replaces napari[all])
+    "pyside6>=6.5", # Qt backend with macOS/arm64 wheels (replaces napari[all])
     "scikit-image>=0.22",
     "numpy>=1.26",
     "magicgui>=0.8",
-    "pyyaml>=6.0",           # config file loading
+    "pyyaml>=6.0", # config file loading
+    "imageio[pyav]>=2.37.2",
 ]
 
 [project.scripts]
