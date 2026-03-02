@@ -70,7 +70,7 @@ def inspect(npy_path: Path, palette: dict) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Inspect annotation .npy files")
-    parser.add_argument("test_dir", nargs="?", default="./test",
+    parser.add_argument("test_dir", nargs="?", default="./test/",
                         help="Folder containing exported .npy masks (default: ./test)")
     parser.add_argument("--config", default=None,
                         help="YAML config file (for palette). Uses built-in defaults if omitted.")
