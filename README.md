@@ -45,10 +45,14 @@ uv run annotator.py path/to/image.png --config my_labels.yaml
 ## Batch mode — annotate a whole folder
 
 ```bash
-uv run batch_annotator.py path/to/folder
+uv run batch_annotator.py                          # opens a folder picker dialog
+uv run batch_annotator.py path/to/folder           # or pass the folder directly
 uv run batch_annotator.py path/to/folder --cell-size 300
 uv run batch_annotator.py path/to/folder --config my_labels.yaml
 ```
+
+If no folder is given, a native **folder picker dialog** appears so you can
+browse to the right location without touching the terminal.
 
 If a `config.yaml` file is found **inside the folder**, it is used automatically
 without needing `--config`.
@@ -131,11 +135,17 @@ When the tool starts, a [napari](https://napari.org) window appears with:
 |---|---|
 | **image** | Your original photo |
 | **superpixel_edges** | Thin black lines showing where each superpixel ends |
-| **borders** | A transparent overlay — paint border classes here |
-| **tissues** | A transparent overlay — paint tissue classes here |
+| **borders** | Annotation overlay — hidden by default, toggle with **Show/Hide** |
+| **tissues** | Annotation overlay — hidden by default, toggle with **Show/Hide** |
 
-On the **right side** you'll see the *Annotation Controls* panel with coloured
-buttons and an export button.
+On the **right side** you'll see the *Annotation Controls* panel.
+
+### Showing and hiding layers
+
+Both annotation layers start **hidden** so you see only the raw image and
+superpixel edges. Each layer section has a **Show / Hide** button next to its
+header. Clicking **Show** makes that layer visible and automatically hides the
+other — so at most one layer is visible at a time, keeping the view clean.
 
 ---
 
@@ -165,27 +175,32 @@ own layer:
 
 ## Step-by-step: how to annotate
 
-1. **Pick a class** — click one of the coloured buttons on the right.
+1. **Show a layer** — click **Show** next to *BORDERS* or *TISSUES* in the
+   right panel. The overlay appears; the other layer is hidden automatically.
+
+2. **Pick a class** — click one of the coloured buttons.
    The status bar at the top of the panel turns that class's colour so you
    always know what will be painted next.
 
-2. **Click a superpixel** — click anywhere inside a superpixel on the image.
+3. **Click a superpixel** — click anywhere inside a superpixel on the image.
    The entire superpixel fills with the class colour instantly.
 
-3. **Paint multiple superpixels at once** — click and drag across several
+4. **Paint multiple superpixels at once** — click and drag across several
    superpixels to fill them all in one stroke.
 
-4. **Change your mind** — to reassign a superpixel, just pick a different
-   class button and click it again. Only that one superpixel is affected,
-   even if its neighbours are already painted the same colour.
+5. **Overwrite a superpixel** — pick a different class button and click the
+   superpixel. It is repainted with the new class immediately.
 
-5. **Un-paint a superpixel** — click the white **"0: Background"** button,
-   then click the superpixel. It goes back to white (unpainted).
+6. **Erase a superpixel** — click the white **"0: Background"** button, then
+   click the superpixel. It becomes transparent again.
 
-6. **Start over** — click **↺ Reset Borders** or **↺ Reset Tissues** to wipe
-   all annotations on that layer and go back to a clean slate.
+7. **Switch layers** — click **Show** on the other layer. The current layer
+   hides automatically so you can work on the new one without colour overlap.
 
-7. **Save your work** — click **Export Annotations**. Four files are written
+8. **Start over** — click **↺ Reset Borders** or **↺ Reset Tissues** to wipe
+   all annotations on that layer.
+
+9. **Save your work** — click **Export Annotations**. Four files are written
    next to your input image:
 
    | File | Contents |
@@ -199,15 +214,18 @@ own layer:
 
 ## Adjusting superpixel behaviour
 
-Open `annotator.py` and change these values near the top:
+Open `annotator.py` and change the constant near the top:
 
 | Constant | Default | What it does |
 |---|---|---|
-| `COMPACTNESS` | `20` | Higher → more square/regular superpixels; lower → superpixels follow colour boundaries more closely |
-| `SIGMA` | `1.0` | Amount of blur applied before segmentation; higher → smoother boundaries |
+| `SIGMA` | `1.0` | Amount of blur before segmentation; higher → smoother boundaries |
+
+The tool uses **SLICO** (parameter-free SLIC), which adapts compactness per
+cluster automatically — no tuning needed.
 
 The number of superpixels is set automatically based on image size
-(`image_height × image_width ÷ 550`), so larger images get more superpixels.
+(`image_height × image_width ÷ cell_size`), so larger images get more superpixels.
+`cell_size` defaults to 550 and can be overridden with `--cell-size`.
 
 ---
 
@@ -215,12 +233,14 @@ The number of superpixels is set automatically based on image size
 
 ```
 napari-slic/
-├── annotator.py       # the whole tool — run this
-├── pyproject.toml     # list of Python packages used (managed by uv)
-└── README.md          # this file
+├── annotator.py        # single-image tool
+├── batch_annotator.py  # batch tool — run this for a folder of images
+├── config.py           # config loader shared by both tools
+├── config.example.yaml # template for custom label sets
+├── inspect_masks.py    # inspect exported .npy masks
+├── pyproject.toml      # dependencies (managed by uv)
+└── README.md           # this file
 ```
-
-Output files are saved in the **same folder as your input image**.
 
 ---
 
@@ -250,17 +270,21 @@ modified — the mask is always exact.
 
 | Value | Meaning |
 |---|---|
-| `-1` | Not yet annotated (shown transparent) |
-| `0` | Explicitly set to Background |
+| `0` | Background (transparent) — the default for every pixel |
 | `1–5` | The painted class ID |
 
-### Export / decoding
+All pixels start as `0`. Painting Background (`0`) over a coloured superpixel
+restores it to transparent — Background acts as an eraser.
 
-Unpainted pixels (`-1`) become background (`0`) on export:
+### SLICO segmentation
 
-```python
-ann = np.where(raw >= 0, raw, 0)
-```
+Superpixels are computed with the **SLICO** variant of the SLIC algorithm
+(`slic_zero=True` in scikit-image). Unlike standard SLIC, SLICO adapts its
+compactness parameter per cluster, so superpixels naturally follow colour
+and texture boundaries without manual tuning.
 
-The final `.npy` files only ever contain values `{0, 1, 2, 3, 4, 5}`.
-# napari-slic
+### Export
+
+The `.npy` files contain only values `{0, 1, 2, 3, 4, 5}` — one integer per
+pixel representing its class ID. `0` means background (unannotated or
+explicitly cleared).

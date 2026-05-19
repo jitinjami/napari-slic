@@ -22,6 +22,7 @@ Keyboard shortcuts:
 
 import argparse
 import os
+import sys
 from pathlib import Path
 
 import napari
@@ -29,6 +30,7 @@ import numpy as np
 from magicgui import widgets as mw
 from napari.utils import DirectLabelColormap
 from napari.utils.colormaps import Colormap
+from PySide6.QtWidgets import QApplication, QFileDialog
 from skimage import io
 from skimage.color import gray2rgb
 from skimage.segmentation import find_boundaries, slic
@@ -36,8 +38,7 @@ from skimage.segmentation import find_boundaries, slic
 from config import build_layer_specs, build_palette, load_config
 
 # ─── Image / SLIC helpers (self-contained, no dependency on annotator.py) ─────
-_COMPACTNESS = 20
-_SIGMA       = 1.0
+_SIGMA = 1.0
 
 
 def load_image(path: str) -> np.ndarray:
@@ -55,8 +56,8 @@ def run_slic(img: np.ndarray, cell_size: int = 550) -> np.ndarray:
     return slic(
         img,
         n_segments=n_segments,
-        compactness=_COMPACTNESS,
         sigma=_SIGMA,
+        slic_zero=True,
         start_label=0,
     ).astype(np.int32)
 
@@ -64,7 +65,6 @@ def run_slic(img: np.ndarray, cell_size: int = 550) -> np.ndarray:
 def build_class_colormap(classes: dict[int, str], palette: dict) -> dict:
     color_dict: dict = {
         None: (1.0, 1.0, 1.0, 0.0),
-        -1:   (1.0, 1.0, 1.0, 0.0),
     }
     for class_id in classes:
         r, g, b = palette[class_id]
@@ -108,7 +108,7 @@ def _anno_path(folder: Path, stem: str, layer_name: str) -> Path:
 def _load_anno(path: Path, shape: tuple) -> np.ndarray:
     if path.exists():
         return np.load(str(path)).astype(np.int32)
-    return np.full(shape, -1, dtype=np.int32)
+    return np.full(shape, 0, dtype=np.int32)
 
 
 def _save_all(ann_layers, layer_specs, folder: Path, stem: str) -> None:
@@ -124,8 +124,7 @@ def _export_one(ann_layers, layer_specs, palette: dict,
     masks_dir = folder / MASKS_DIR
     masks_dir.mkdir(exist_ok=True)
     for (layer_name, _), ann_layer in zip(layer_specs, ann_layers):
-        raw = ann_layer.data.copy()
-        ann = np.where(raw >= 0, raw, 0).astype(np.int32)
+        ann = ann_layer.data.copy().astype(np.int32)
         npy_path = masks_dir / f"{stem}_{layer_name}.npy"
         png_path = masks_dir / f"{stem}_{layer_name}.png"
         np.save(str(npy_path), ann)
@@ -143,13 +142,20 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Napari batch superpixel annotation tool"
     )
-    parser.add_argument("folder", nargs="?", default="./test/",
-                        help="Folder containing images to annotate (default: current directory)")
+    parser.add_argument("folder", nargs="?", default=None,
+                        help="Folder containing images to annotate (shows picker if omitted)")
     parser.add_argument("--cell-size", type=int, default=None,
                         help="Pixels per superpixel (default: 550 or from config)")
     parser.add_argument("--config", default=None,
                         help="Path to a YAML config file (classes, colors, cell_size)")
     args = parser.parse_args()
+
+    if args.folder is None:
+        _qapp = QApplication.instance() or QApplication(sys.argv)
+        folder_str = QFileDialog.getExistingDirectory(None, "Select image folder")
+        if not folder_str:
+            raise SystemExit(0)
+        args.folder = folder_str
 
     folder = Path(os.path.normpath(os.path.abspath(os.path.expanduser(args.folder))))
     if not folder.is_dir():
@@ -213,6 +219,7 @@ def main() -> None:
             color_dict=build_class_colormap(classes, palette)
         )
         layer.mode = "pan_zoom"
+        layer.visible = False
         return layer
 
     ann_layers = [
@@ -244,12 +251,9 @@ def main() -> None:
             print(f"[undo] {active.name} — {len(stack)} step(s) remaining")
 
     # ── Painting ──────────────────────────────────────────────────────────────
-    def _paint_at_world(world_pos) -> None:
+    def _paint_at_world(world_pos, paint_value: int) -> None:
         active = viewer.layers.selection.active
         if active not in ann_layers:
-            return
-        class_id = layer_class.get(active)
-        if class_id is None:
             return
         coords = ann_layers[0].world_to_data(world_pos)
         if coords is None:
@@ -260,7 +264,7 @@ def main() -> None:
         slic_id = int(state["segments"][r, c])
         mask = state["segments"] == slic_id
         new_data = active.data.copy()
-        new_data[mask] = class_id
+        new_data[mask] = paint_value
         active.data = new_data
 
     def on_drag(viewer_obj, event):
@@ -269,15 +273,16 @@ def main() -> None:
         active = viewer.layers.selection.active
         if active not in ann_layers:
             return
-        if layer_class.get(active) is None:
+        class_id = layer_class.get(active)
+        if class_id is None:
             return
         _push_undo(active)
         event.handled = True
-        _paint_at_world(event.position)
+        _paint_at_world(event.position, class_id)
         yield
         while event.type == "mouse_move":
             event.handled = True
-            _paint_at_world(event.position)
+            _paint_at_world(event.position, class_id)
             yield
 
     viewer.mouse_drag_callbacks.append(on_drag)
@@ -302,6 +307,9 @@ def main() -> None:
 
         viewer.reset_view()
         _update_nav()
+        for layer, btn in _layer_vis_btns:
+            layer.visible = False
+            btn.text = "Show"
 
     # ── Widget ────────────────────────────────────────────────────────────────
     status_label = mw.Label(value="  No class selected  ")
@@ -345,14 +353,35 @@ def main() -> None:
     def _reset(layer: napari.layers.Labels) -> None:
         _push_undo(layer)
         H, W = state["H"], state["W"]
-        layer.data = np.full((H, W), -1, dtype=np.int32)
+        layer.data = np.full((H, W), 0, dtype=np.int32)
         layer.refresh()
+
+    _layer_vis_btns: list = []
+
+    def _toggle_layer_vis(target: napari.layers.Labels) -> None:
+        currently_visible = target.visible
+        for layer, btn in _layer_vis_btns:
+            layer.visible = False
+            btn.text = "Show"
+        if not currently_visible:
+            target.visible = True
+            for layer, btn in _layer_vis_btns:
+                if layer is target:
+                    btn.text = "Hide"
+                    break
 
     items: list[mw.Widget] = [nav_label, status_label, mw.Label(value="")]
 
     # Class buttons — one section per layer
     for (layer_name, classes), ann_layer in zip(layer_specs, ann_layers):
-        items.append(mw.Label(value=f"─── {layer_name.upper()} ───"))
+        vis_btn = mw.PushButton(text="Show")
+        vis_btn.native.setStyleSheet("padding: 2px 8px; font-size: 11px;")
+        _layer_vis_btns.append((ann_layer, vis_btn))
+        vis_btn.changed.connect(lambda _, t=ann_layer: _toggle_layer_vis(t))
+        items.append(mw.Container(
+            widgets=[mw.Label(value=f"─── {layer_name.upper()} ───"), vis_btn],
+            layout="horizontal", label=""
+        ))
         for cls_id, cls_label in classes.items():
             btn = make_button(f"{cls_id}: {cls_label}", palette[cls_id])
             btn.changed.connect(

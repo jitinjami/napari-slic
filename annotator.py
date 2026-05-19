@@ -27,9 +27,8 @@ from skimage.color import gray2rgb
 from skimage.segmentation import find_boundaries, slic
 
 # ─── Configurable constants ────────────────────────────────────────────────────
-IMAGE_PATH  = "sample.png"
-COMPACTNESS = 20
-SIGMA       = 1.0
+IMAGE_PATH = "sample.png"
+SIGMA      = 1.0
 # ───────────────────────────────────────────────────────────────────────────────
 
 # ─── Class palette (RGB 0-255) ─────────────────────────────────────────────────
@@ -61,8 +60,8 @@ def run_slic(img: np.ndarray) -> np.ndarray:
     segments = slic(
         img,
         n_segments=n_segments,
-        compactness=COMPACTNESS,
         sigma=SIGMA,
+        slic_zero=True,
         start_label=0,
     ).astype(np.int32)
     return segments
@@ -78,7 +77,6 @@ def build_class_colormap(classes: dict[int, str]) -> dict:
     """
     color_dict: dict = {
         None: (1.0, 1.0, 1.0, 0.0),   # catch-all → fully transparent
-        -1:   (1.0, 1.0, 1.0, 0.0),   # unpainted → transparent
     }
     for class_id in classes:
         r, g, b = PALETTE[class_id]
@@ -126,7 +124,7 @@ def main() -> None:
     # Data stores plain class IDs: -1 = unpainted, 0 = background, 1-5 = classes.
     # We never use napari's fill tool; painting is done in mouse callbacks below.
     def make_ann_layer(name: str, classes: dict) -> napari.layers.Labels:
-        data = np.full((H, W), -1, dtype=np.int32)
+        data = np.full((H, W), 0, dtype=np.int32)
         from napari.utils import DirectLabelColormap
         layer = viewer.add_labels(
             data,
@@ -139,53 +137,45 @@ def main() -> None:
 
     borders_layer = make_ann_layer("borders", BORDER_CLASSES)
     tissues_layer = make_ann_layer("tissues", TISSUE_CLASSES)
+    borders_layer.visible = False
+    tissues_layer.visible = False
 
     # ── State ─────────────────────────────────────────────────────────────────
     layer_class: dict[napari.layers.Labels, int] = {}
 
     # ── Painting helpers ──────────────────────────────────────────────────────
-    def _paint_at_world(world_pos) -> None:
-        """Paint the superpixel under world_pos on the currently active layer."""
+    def _paint_at_world(world_pos, paint_value: int) -> None:
         active = viewer.layers.selection.active
         if active not in (borders_layer, tissues_layer):
             return
-        class_id = layer_class.get(active, None)
-        if class_id is None:
-            return   # no class selected yet
-
         coords = borders_layer.world_to_data(world_pos)
         if coords is None:
             return
         r, c = int(round(coords[-2])), int(round(coords[-1]))
         if not (0 <= r < H and 0 <= c < W):
             return
-
         slic_id = int(segments[r, c])
-        mask = segments == slic_id          # every pixel of this superpixel
-
+        mask = segments == slic_id
         new_data = active.data.copy()
-        new_data[mask] = class_id           # store plain class ID
+        new_data[mask] = paint_value
         active.data = new_data
 
     # ── Mouse drag callback (napari generator pattern) ────────────────────────
-    # mouse_drag_callbacks fires on left-click and left-drag.
-    # event.handled = True on each event suppresses pan_zoom so the drag
-    # paints rather than pans.  When no class is selected we return early so
-    # normal panning still works.
     def on_drag(viewer_obj, event):
         if event.button != 1:
             return
         active = viewer.layers.selection.active
         if active not in (borders_layer, tissues_layer):
             return
-        if layer_class.get(active) is None:
+        class_id = layer_class.get(active)
+        if class_id is None:
             return  # no class chosen yet — allow normal panning
-        event.handled = True              # suppress pan_zoom on press
-        _paint_at_world(event.position)
+        event.handled = True
+        _paint_at_world(event.position, class_id)
         yield
         while event.type == "mouse_move":
-            event.handled = True          # suppress pan_zoom on each move
-            _paint_at_world(event.position)
+            event.handled = True
+            _paint_at_world(event.position, class_id)
             yield
 
     viewer.mouse_drag_callbacks.append(on_drag)
@@ -214,14 +204,12 @@ def main() -> None:
         )
 
     def _reset(layer: napari.layers.Labels) -> None:
-        layer.data = np.full((H, W), -1, dtype=np.int32)
+        layer.data = np.full((H, W), 0, dtype=np.int32)
         layer.refresh()
 
     def _export(layer: napari.layers.Labels, name: str) -> None:
         out_dir = Path(image_path).parent
-        raw = layer.data.copy()
-        # Unpainted pixels (-1) become class 0 (background) on export
-        ann = np.where(raw >= 0, raw, 0).astype(np.int32)
+        ann = layer.data.copy().astype(np.int32)
         npy_path = out_dir / f"{name}.npy"
         png_path = out_dir / f"{name}.png"
         np.save(npy_path, ann)
@@ -232,9 +220,30 @@ def main() -> None:
         io.imsave(str(png_path), rgb)
         print(f"[annotator] Saved -> {npy_path}  |  {png_path}")
 
+    _layer_vis_btns: list = []
+
+    def _toggle_layer_vis(target: napari.layers.Labels) -> None:
+        currently_visible = target.visible
+        for layer, btn in _layer_vis_btns:
+            layer.visible = False
+            btn.text = "Show"
+        if not currently_visible:
+            target.visible = True
+            for layer, btn in _layer_vis_btns:
+                if layer is target:
+                    btn.text = "Hide"
+                    break
+
     items: list[mw.Widget] = [status_label, mw.Label(value="")]
 
-    items.append(mw.Label(value="─── BORDERS ───"))
+    borders_vis_btn = mw.PushButton(text="Show")
+    borders_vis_btn.native.setStyleSheet("padding: 2px 8px; font-size: 11px;")
+    _layer_vis_btns.append((borders_layer, borders_vis_btn))
+    borders_vis_btn.changed.connect(lambda _: _toggle_layer_vis(borders_layer))
+    items.append(mw.Container(
+        widgets=[mw.Label(value="─── BORDERS ───"), borders_vis_btn],
+        layout="horizontal", label=""
+    ))
     for lid, name in BORDER_CLASSES.items():
         btn = make_button(f"{lid}: {name}", PALETTE[lid])
         btn.changed.connect(lambda _, l=lid: _activate(borders_layer, l))
@@ -247,7 +256,14 @@ def main() -> None:
     items.append(reset_borders)
 
     items.append(mw.Label(value=""))
-    items.append(mw.Label(value="─── TISSUES ───"))
+    tissues_vis_btn = mw.PushButton(text="Show")
+    tissues_vis_btn.native.setStyleSheet("padding: 2px 8px; font-size: 11px;")
+    _layer_vis_btns.append((tissues_layer, tissues_vis_btn))
+    tissues_vis_btn.changed.connect(lambda _: _toggle_layer_vis(tissues_layer))
+    items.append(mw.Container(
+        widgets=[mw.Label(value="─── TISSUES ───"), tissues_vis_btn],
+        layout="horizontal", label=""
+    ))
     for lid, name in TISSUE_CLASSES.items():
         btn = make_button(f"{lid}: {name}", PALETTE[lid])
         btn.changed.connect(lambda _, l=lid: _activate(tissues_layer, l))
