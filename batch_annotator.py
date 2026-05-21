@@ -155,7 +155,10 @@ def main() -> None:
         _tk = tk.Tk()
         _tk.withdraw()
         _tk.attributes("-topmost", True)
-        folder_str = filedialog.askdirectory(title="Select image folder")
+        folder_str = filedialog.askdirectory(
+            title="Select image folder",
+            initialdir=Path.home(),
+        )
         _tk.destroy()
         if not folder_str:
             raise SystemExit(0)
