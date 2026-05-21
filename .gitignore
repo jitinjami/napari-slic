@@ -1,0 +1,12 @@
+# Tutorial (local only — screenshots not tracked)
+tutorial/
+tutorial_plan.md
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# macOS
+.DS_Store
