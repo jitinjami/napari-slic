@@ -30,7 +30,6 @@ import numpy as np
 from magicgui import widgets as mw
 from napari.utils import DirectLabelColormap
 from napari.utils.colormaps import Colormap
-from PySide6.QtWidgets import QApplication, QFileDialog
 from skimage import io
 from skimage.color import gray2rgb
 from skimage.segmentation import find_boundaries, slic
@@ -151,8 +150,13 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.folder is None:
-        _qapp = QApplication.instance() or QApplication(sys.argv)
-        folder_str = QFileDialog.getExistingDirectory(None, "Select image folder")
+        import tkinter as tk
+        from tkinter import filedialog
+        _tk = tk.Tk()
+        _tk.withdraw()
+        _tk.attributes("-topmost", True)
+        folder_str = filedialog.askdirectory(title="Select image folder")
+        _tk.destroy()
         if not folder_str:
             raise SystemExit(0)
         args.folder = folder_str
