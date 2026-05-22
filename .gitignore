@@ -1,6 +1,8 @@
 # Tutorial (local only — screenshots not tracked)
 tutorial/
 tutorial_plan.md
+08_*
+09_*
 
 # Python
 __pycache__/

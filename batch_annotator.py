@@ -2,7 +2,7 @@
 Napari Batch Superpixel Annotation Tool
 ========================================
 Usage:
-    uv run batch_annotator.py path/to/folder [--cell-size N] [--config path.yaml]
+    uv run batch_annotator.py path/to/folder
 
 Reads all images in the folder and lets you annotate them one by one.
 Navigation auto-saves the current image's annotations before switching.
@@ -23,6 +23,7 @@ Keyboard shortcuts:
 import argparse
 import os
 import sys
+import threading
 from pathlib import Path
 
 import napari
@@ -143,10 +144,6 @@ def main() -> None:
     )
     parser.add_argument("folder", nargs="?", default=None,
                         help="Folder containing images to annotate (shows picker if omitted)")
-    parser.add_argument("--cell-size", type=int, default=None,
-                        help="Pixels per superpixel (default: 550 or from config)")
-    parser.add_argument("--config", default=None,
-                        help="Path to a YAML config file (classes, colors, cell_size)")
     args = parser.parse_args()
 
     if args.folder is None:
@@ -174,19 +171,36 @@ def main() -> None:
         print(f"No images found in {folder}")
         raise SystemExit(1)
 
-    # Auto-discover config.yaml in the folder if --config not given
-    config_path = args.config
-    if config_path is None and (folder / "config.yaml").exists():
-        config_path = folder / "config.yaml"
-        print(f"[batch] Using config: {config_path}")
-
-    cfg         = load_config(config_path)
-    cell_size   = args.cell_size if args.cell_size is not None else cfg["cell_size"]
+    cfg         = load_config(None)
+    cell_size   = cfg["cell_size"]
     palette     = build_palette(cfg)
     layer_specs = build_layer_specs(cfg)
 
     n = len(images)
     print(f"[batch] Found {n} image(s) in {folder}")
+
+    # ── Superpixel cache ───────────────────────────────────────────────────────
+    _seg_cache: dict[int, np.ndarray] = {}
+    _seg_lock = threading.Lock()
+    _seg_dir = folder / SAVE_DIR
+
+    def _get_segments(idx: int) -> np.ndarray:
+        with _seg_lock:
+            if idx in _seg_cache:
+                return _seg_cache[idx]
+        cache_path = _seg_dir / f"{images[idx].stem}_segs_{cell_size}.npy"
+        if cache_path.exists():
+            segs = np.load(str(cache_path)).astype(np.int32)
+            with _seg_lock:
+                _seg_cache[idx] = segs
+            return segs
+        img = load_image(str(images[idx]))
+        segs = run_slic(img, cell_size=cell_size)
+        _seg_dir.mkdir(exist_ok=True)
+        np.save(str(cache_path), segs)
+        with _seg_lock:
+            _seg_cache[idx] = segs
+        return segs
 
     # ── Mutable state ──────────────────────────────────────────────────────────
     state: dict = {"idx": 0, "segments": None, "H": 0, "W": 0}
@@ -196,7 +210,7 @@ def main() -> None:
 
     def _load_image_state(idx: int):
         img = load_image(str(images[idx]))
-        segs = run_slic(img, cell_size=cell_size)
+        segs = _get_segments(idx)
         H, W = segs.shape
         state["segments"] = segs
         state["H"] = H
@@ -204,6 +218,17 @@ def main() -> None:
         return img, segs, H, W
 
     img, segs, H, W = _load_image_state(0)
+
+    def _precompute_remaining():
+        remaining = [i for i in range(n) if i != 0]
+        if not remaining:
+            return
+        print(f"[batch] Pre-computing superpixels for {len(remaining)} image(s) in background...")
+        for i in remaining:
+            _get_segments(i)
+        print("[batch] Superpixel pre-computation complete.")
+
+    threading.Thread(target=_precompute_remaining, daemon=True).start()
 
     # ── Viewer ────────────────────────────────────────────────────────────────
     viewer = napari.Viewer(title="Batch Superpixel Annotator")
