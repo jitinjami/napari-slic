@@ -3,7 +3,7 @@ name = "napari-slic"
 version = "0.1.0"
 description = "Interactive superpixel annotation tool using Napari and scikit-image SLIC."
 
-requires-python = "==3.10.20"
+requires-python = "==3.10"
 
 dependencies = [
     "napari>=0.5.0",
