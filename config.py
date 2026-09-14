@@ -29,6 +29,7 @@ _DEFAULT_LAYERS = [
             {"id": 3, "label": "Granulation", "color": [238,  83,   0]},
             {"id": 4, "label": "Slough",      "color": [  0, 157,  99]},
             {"id": 5, "label": "Necrosis",    "color": [  0,   0,   0]},
+            {"id": 6, "label": "Unhealthy Granulation", "color": [128, 0, 32]},
         ],
     },
 ]

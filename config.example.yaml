@@ -39,3 +39,6 @@ layers:
       - id: 5
         label: Necrosis
         color: [0, 0, 0]           # black
+      - id: 6
+        label: Unhealthy Granulation
+        color: [128, 0, 32]        # burgundy
