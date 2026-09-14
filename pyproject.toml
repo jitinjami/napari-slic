@@ -26,4 +26,4 @@ build-backend = "hatchling.build"
 packages = ["."]
 
 [tool.uv]
-# Run directly without installing:  uv run annotator.py [image_path]
+# Run directly without installing:  uv run batch_annotator.py [folder]

@@ -32,30 +32,16 @@ virtual environment manually.
 
 ## Running the tool
 
-### Single image
+The tool works on a **folder of images**. To annotate a single image, put it in
+a folder of its own.
 
 ```bash
-uv run annotator.py path/to/image.png
-uv run annotator.py path/to/image.png --cell-size 300   # finer superpixels
-uv run annotator.py path/to/image.png --config my_labels.yaml
-```
-
----
-
-## Batch mode — annotate a whole folder
-
-```bash
-uv run batch_annotator.py                          # opens a folder picker dialog
-uv run batch_annotator.py path/to/folder           # or pass the folder directly
-uv run batch_annotator.py path/to/folder --cell-size 300
-uv run batch_annotator.py path/to/folder --config my_labels.yaml
+uv run batch_annotator.py                    # opens a folder picker dialog
+uv run batch_annotator.py path/to/folder     # or pass the folder directly
 ```
 
 If no folder is given, a native **folder picker dialog** appears so you can
 browse to the right location without touching the terminal.
-
-If a `config.yaml` file is found **inside the folder**, it is used automatically
-without needing `--config`.
 
 The right-hand panel gains extra controls:
 
@@ -71,9 +57,10 @@ The right-hand panel gains extra controls:
 
 ```
 <folder>/
-├── .annotations/          ← auto-saved project state
-│   ├── image_001_borders.npy
-│   ├── image_001_tissues.npy
+├── .annotations/          ← auto-saved project state (hidden folder)
+│   ├── image_001_segs_550.npy    ← cached superpixels
+│   ├── image_001_borders.npy     ← your border annotations
+│   ├── image_001_tissues.npy     ← your tissue annotations
 │   └── ...
 └── masks/                 ← exported masks (created on demand)
     ├── image_001_borders.npy / .png
@@ -82,6 +69,31 @@ The right-hand panel gains extra controls:
 
 > Re-opening the same folder later restores your previous annotations
 > automatically.
+
+---
+
+## Speeding up large datasets *(optional)*
+
+Working out the superpixels for an image takes a moment — roughly 0.2 s for a
+small photo, 1.5 s for a large one. `batch_annotator.py` does this for you
+automatically and caches the result, so you normally do not need to think
+about it.
+
+If you are preparing a **whole dataset for other people to annotate**, run this
+once first:
+
+```bash
+uv run batch_precompute.py path/to/dataset
+```
+
+It walks every subfolder, computes the superpixels for every image using all
+your CPU cores, and writes them into each folder's `.annotations/`. A few
+hundred images take well under a minute instead of several minutes.
+
+Then hand over the dataset folder **including the hidden `.annotations/`
+folders** — the annotator opens every image instantly, with no waiting.
+
+Already-computed images are skipped, so it is safe to re-run at any time.
 
 ---
 
@@ -96,27 +108,25 @@ The right-hand panel gains extra controls:
 
 ---
 
-## Custom classes — config file
+## Custom classes
 
-Copy `config.example.yaml` to your image folder (or anywhere), edit it, and
-pass it with `--config`:
+Classes are defined in one place: **`config.py`**. Edit the `_DEFAULT_LAYERS`
+list near the top of that file — no other file needs changing.
 
-```yaml
-cell_size: 300   # smaller = more superpixels
-
-layers:
-  - name: tissue_type
-    classes:
-      - id: 0
-        label: Background
-        color: [255, 255, 255]
-      - id: 1
-        label: Tumor
-        color: [220, 50, 50]
-      - id: 2
-        label: Stroma
-        color: [50, 180, 100]
+```python
+_DEFAULT_LAYERS = [
+    {
+        "name": "tissue_type",
+        "classes": [
+            {"id": 0, "label": "Background", "color": [255, 255, 255]},
+            {"id": 1, "label": "Tumor",      "color": [220,  50,  50]},
+            {"id": 2, "label": "Stroma",     "color": [ 50, 180, 100]},
+        ],
+    },
+]
 ```
+
+Colours are **RGB**, 0–255. `cell_size` is set just above, in the same file.
 
 Rules:
 - You can have **any number of layers** (each gets its own saved mask).
@@ -149,7 +159,7 @@ other — so at most one layer is visible at a time, keeping the view clean.
 
 ---
 
-## The six label classes
+## The seven label classes
 
 There are two separate labelling tasks. Each has its own set of classes and its
 own layer:
@@ -170,6 +180,7 @@ own layer:
 | Orange | 3 · Granulation | Healing red/pink granulation tissue |
 | Green | 4 · Slough | Yellow/white dead tissue |
 | Black | 5 · Necrosis | Dark dead tissue |
+| Burgundy | 6 · Unhealthy Granulation | Poor-quality, non-healing granulation |
 
 ---
 
@@ -200,32 +211,30 @@ own layer:
 8. **Start over** — click **↺ Reset Borders** or **↺ Reset Tissues** to wipe
    all annotations on that layer.
 
-9. **Save your work** — click **Export Annotations**. Four files are written
-   next to your input image:
+9. **Save your work** — your annotations are saved automatically whenever you
+   move to another image, and **💾 Save** saves on demand. Use **📤 Export This**
+   or **📤 Export All** to write finished masks to `masks/`. See
+   [Where files go](#where-files-go).
 
-   | File | Contents |
-   |---|---|
-   | `borders.npy` | NumPy array of border class IDs (values 0–2) |
-   | `borders.png` | Colour image of border annotations |
-   | `tissues.npy` | NumPy array of tissue class IDs (values 0, 3–5) |
-   | `tissues.png` | Colour image of tissue annotations |
+   > **Always save before closing the window** — closing does not autosave.
 
 ---
 
 ## Adjusting superpixel behaviour
 
-Open `annotator.py` and change the constant near the top:
-
-| Constant | Default | What it does |
-|---|---|---|
-| `SIGMA` | `1.0` | Amount of blur before segmentation; higher → smoother boundaries |
+| Setting | Where | Default | What it does |
+|---|---|---|---|
+| `cell_size` | `config.py` | `550` | Pixels per superpixel; smaller → more, finer superpixels |
+| `_SIGMA` | `batch_annotator.py` / `batch_precompute.py` | `1.0` | Blur before segmentation; higher → smoother boundaries |
 
 The tool uses **SLICO** (parameter-free SLIC), which adapts compactness per
 cluster automatically — no tuning needed.
 
 The number of superpixels is set automatically based on image size
 (`image_height × image_width ÷ cell_size`), so larger images get more superpixels.
-`cell_size` defaults to 550 and can be overridden with `--cell-size`.
+
+> Changing `cell_size` invalidates cached superpixels — the cache filename
+> embeds it, so new files are generated on the next run.
 
 ---
 
@@ -233,11 +242,9 @@ The number of superpixels is set automatically based on image size
 
 ```
 napari-slic/
-├── annotator.py        # single-image tool
-├── batch_annotator.py  # batch tool — run this for a folder of images
-├── config.py           # config loader shared by both tools
-├── config.example.yaml # template for custom label sets
-├── inspect_masks.py    # inspect exported .npy masks
+├── batch_annotator.py  # the annotation tool — run this on a folder of images
+├── batch_precompute.py # optional: pre-compute superpixels for a whole dataset
+├── config.py           # class definitions (edit this to change classes)
 ├── pyproject.toml      # dependencies (managed by uv)
 └── README.md           # this file
 ```
@@ -271,7 +278,7 @@ modified — the mask is always exact.
 | Value | Meaning |
 |---|---|
 | `0` | Background (transparent) — the default for every pixel |
-| `1–5` | The painted class ID |
+| `1–6` | The painted class ID |
 
 All pixels start as `0`. Painting Background (`0`) over a coloured superpixel
 restores it to transparent — Background acts as an eraser.
@@ -285,6 +292,6 @@ and texture boundaries without manual tuning.
 
 ### Export
 
-The `.npy` files contain only values `{0, 1, 2, 3, 4, 5}` — one integer per
+The `.npy` files contain only values `{0, 1, 2, 3, 4, 5, 6}` — one integer per
 pixel representing its class ID. `0` means background (unannotated or
 explicitly cleared).

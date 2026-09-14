@@ -1,9 +1,14 @@
 """
-precompute_all.py — Pre-compute superpixels for every image-containing
-subfolder under a root directory, using all available CPU cores.
+batch_precompute.py — Pre-compute and cache superpixels for every
+image-containing subfolder under a root directory, using all CPU cores.
+
+Run this before handing a dataset to annotators. It writes
+    <folder>/.annotations/<stem>_segs_<cell_size>.npy
+for every image, so batch_annotator.py loads them instantly instead of
+recomputing. Already-cached images are skipped, so re-running is cheap.
 
 Usage:
-    uv run precompute_all.py path/to/root
+    uv run batch_precompute.py path/to/root
 """
 
 import argparse
@@ -12,9 +17,41 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
+from skimage import io
+from skimage.color import gray2rgb
+from skimage.segmentation import slic
 
 from config import load_config
-from precompute import IMAGE_EXTS, SAVE_DIR, find_images, load_image, run_slic
+
+# Kept self-contained so the worker processes never import napari/Qt.
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
+SAVE_DIR   = ".annotations"
+_SIGMA     = 1.0
+
+
+def find_images(folder: Path) -> list[Path]:
+    return sorted(p for p in folder.iterdir() if p.suffix.lower() in IMAGE_EXTS)
+
+
+def load_image(path: str) -> np.ndarray:
+    img = io.imread(path)
+    if img.ndim == 2:
+        img = gray2rgb(img)
+    if img.dtype != np.uint8:
+        img = (img / img.max() * 255).astype(np.uint8)
+    return img[:, :, :3]
+
+
+def run_slic(img: np.ndarray, cell_size: int) -> np.ndarray:
+    h, w, _ = img.shape
+    n_segments = max(1, int((h * w) / cell_size))
+    return slic(
+        img,
+        n_segments=n_segments,
+        sigma=_SIGMA,
+        slic_zero=True,
+        start_label=0,
+    ).astype(np.int32)
 
 
 def find_image_folders(root: Path) -> list[Path]:
@@ -64,8 +101,8 @@ def main() -> None:
         raise SystemExit(0)
 
     workers = os.cpu_count() or 4
-    print(f"[precompute_all] {len(all_images)} image(s) across {len(folders)} folder(s)")
-    print(f"[precompute_all] cell_size={cell_size}  workers={workers}\n")
+    print(f"[batch_precompute] {len(all_images)} image(s) across {len(folders)} folder(s)")
+    print(f"[batch_precompute] cell_size={cell_size}  workers={workers}\n")
 
     tasks = [(str(p), cell_size) for p in all_images]
     total = len(tasks)
@@ -79,7 +116,7 @@ def main() -> None:
             status = "cached" if cached else "computed"
             print(f"  [{done}/{total}] {name}  ({status})")
 
-    print(f"\n[precompute_all] Done.")
+    print(f"\n[batch_precompute] Done.")
 
 
 if __name__ == "__main__":
