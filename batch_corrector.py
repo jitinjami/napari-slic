@@ -31,6 +31,7 @@ Keyboard shortcuts:
 """
 
 import argparse
+import json
 import os
 from itertools import combinations
 from pathlib import Path
@@ -52,6 +53,14 @@ SAVE_DIR    = ".annotations"
 SEG_MARKER  = "_segs_"
 MAX_UNDO    = 20
 
+# Remembers the last dataset folder, so the picker opens there next time.
+PREFS_FILE = Path.home() / ".napari_slic.json"
+PREFS_KEY  = "batch_corrector_last_folder"
+
+# Which annotation layers are offered for correction. Border disagreements are
+# left as they are; add "borders" back here to correct them too.
+CORRECT_LAYERS = ("tissues",)
+
 # napari's Labels layer is happiest with non-negative integers, so the negative
 # codes are shifted into a high positive band purely for display. The arrays on
 # disk stay signed.  -1 -> 101, -10 -> 110
@@ -68,6 +77,29 @@ SETTLED_A    = 0.30                       # agreed / already-decided, as context
 
 
 # ─── Pure helpers (no napari) ─────────────────────────────────────────────────
+
+def recall_folder() -> Path:
+    """Last folder opened, or home if none is stored or it no longer exists."""
+    try:
+        last = Path(json.loads(PREFS_FILE.read_text())[PREFS_KEY])
+        if last.is_dir():
+            return last
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return Path.home()
+
+
+def remember_folder(folder: Path) -> None:
+    try:
+        prefs = json.loads(PREFS_FILE.read_text()) if PREFS_FILE.exists() else {}
+    except (OSError, ValueError):
+        prefs = {}
+    prefs[PREFS_KEY] = str(folder)
+    try:
+        PREFS_FILE.write_text(json.dumps(prefs, indent=2))
+    except OSError:
+        pass   # not worth failing a session over
+
 
 def load_image(path: str) -> np.ndarray:
     img = io.imread(path)
@@ -115,6 +147,17 @@ def build_codes(layer_specs) -> dict:
         pairs = combinations(sorted(classes), 2)
         codes[name] = {-(i + 1): pair for i, pair in enumerate(pairs)}
     return codes
+
+
+CONFLICT_GROUPS = (
+    ("background", "BACKGROUND vs TISSUE"),
+    ("tissue",     "TISSUE vs TISSUE"),
+)
+
+
+def conflict_group(pair: tuple) -> str:
+    """Which panel section a disagreement code is listed under."""
+    return "background" if 0 in pair else "tissue"
 
 
 def to_display(signed: np.ndarray) -> np.ndarray:
@@ -182,7 +225,7 @@ def main() -> None:
         from tkinter import filedialog
         _tk = tk.Tk(); _tk.withdraw(); _tk.attributes("-topmost", True)
         chosen = filedialog.askdirectory(title="Select dataset folder",
-                                         initialdir=Path.home())
+                                         initialdir=recall_folder())
         _tk.destroy()
         if not chosen:
             raise SystemExit(0)
@@ -192,10 +235,12 @@ def main() -> None:
     if not root.is_dir():
         print(f"Not a directory: {root}")
         raise SystemExit(1)
+    remember_folder(root)
 
     cfg         = load_config(None)
     palette     = build_palette(cfg)
-    layer_specs = build_layer_specs(cfg)
+    layer_specs = [(name, classes) for name, classes in build_layer_specs(cfg)
+                   if name in CORRECT_LAYERS]
     codes       = build_codes(layer_specs)
     class_name  = {cid: lbl for _, cls in layer_specs for cid, lbl in cls.items()}
 
@@ -331,6 +376,12 @@ def main() -> None:
     )
 
     conflict_btns: dict = {}
+    group_headers: dict = {}
+
+    def conflict_order(layer: str) -> list:
+        """Background group first, then tissue group; -1, -2, ... within each."""
+        return sorted(codes[layer], key=lambda c: (
+            [g for g, _ in CONFLICT_GROUPS].index(conflict_group(codes[layer][c])), -c))
     resolve_a = mw.PushButton(text="")
     resolve_b = mw.PushButton(text="")
     resolve_a.visible = resolve_b.visible = False
@@ -374,6 +425,10 @@ def main() -> None:
             btn.native.setStyleSheet(
                 "text-align:left; padding:4px 8px; font-size:11px;"
                 + ("" if left else " color:#6a6;"))
+        for (layer, group), header in group_headers.items():
+            header.visible = any(
+                state["present"].get(layer, {}).get(c, 0) > 0
+                for c in codes[layer] if conflict_group(codes[layer][c]) == group)
         _update_nav()
 
     def _activate(layer: str, code: int) -> None:
@@ -530,8 +585,8 @@ def main() -> None:
         _refresh_outline()
 
     def _next_conflict() -> None:
-        order = [(l, c) for l, _ in layer_specs
-                 for c in sorted(codes.get(l, {}))
+        order = [(l, c) for l, _ in layer_specs if l in ann_layers
+                 for c in conflict_order(l)
                  if state["counts"].get(l, {}).get(c, 0) > 0]
         if not order:
             return
@@ -547,15 +602,20 @@ def main() -> None:
     for layer, _ in layer_specs:
         if layer not in ann_layers:
             continue
-        items.append(mw.Label(value=f"─── {layer.upper()} ───"))
-        for code in sorted(codes[layer], reverse=True):
-            btn = mw.PushButton(text="")
-            btn.native.setStyleSheet(
-                "text-align:left; padding:4px 8px; font-size:11px;")
-            btn.changed.connect(lambda _, l=layer, c=code: _activate(l, c))
-            btn.visible = False
-            conflict_btns[(layer, code)] = btn
-            items.append(btn)
+        for group, title in CONFLICT_GROUPS:
+            header = mw.Label(value=f"─── {title} ───")
+            group_headers[(layer, group)] = header
+            items.append(header)
+            for code in conflict_order(layer):
+                if conflict_group(codes[layer][code]) != group:
+                    continue
+                btn = mw.PushButton(text="")
+                btn.native.setStyleSheet(
+                    "text-align:left; padding:4px 8px; font-size:11px;")
+                btn.changed.connect(lambda _, l=layer, c=code: _activate(l, c))
+                btn.visible = False
+                conflict_btns[(layer, code)] = btn
+                items.append(btn)
         items.append(mw.Label(value=""))
 
     items.append(mw.Label(value="─── RESOLVE TO ───"))
@@ -588,6 +648,16 @@ def main() -> None:
         shown = state["active"][0] if state["active"] else None
         for name, lyr in ann_layers.items():
             lyr.visible = state["overlay"] and name == shown
+
+    def _toggle_outlines() -> None:
+        show = not outline_layer.visible
+        outline_layer.visible = show
+        decided_layer.visible = show
+
+    outline_btn = mw.PushButton(text="Toggle conflict outlines")
+    outline_btn.native.setStyleSheet("padding:2px 8px; font-size:11px;")
+    outline_btn.changed.connect(lambda _: _toggle_outlines())
+    items.append(outline_btn)
 
     overlay_btn = mw.PushButton(text="Toggle colour overlay")
     overlay_btn.native.setStyleSheet("padding:2px 8px; font-size:11px;")
