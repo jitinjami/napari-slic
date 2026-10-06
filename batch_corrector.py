@@ -25,6 +25,7 @@ Re-opening the folder picks up each image exactly where it was left.
 Keyboard shortcuts:
     Tab          — next unresolved conflict on this image
     1 / 2        — choose the first / second class of the active conflict
+    Space (hold) — drag to pan instead of paint
     Left / Right — previous / next image (auto-saves)
     Ctrl-Z       — undo the last decision
 """
@@ -213,6 +214,8 @@ def main() -> None:
         "counts": {},    # layer -> {code: remaining superpixels}
         "active": None,  # (layer, code)
         "paint": None,   # chosen class id
+        "panning": False,  # Space held: left-drag pans instead of paints
+        "overlay": False,  # class-colour overlay shown? off by default
     }
 
     def cur() -> Path:
@@ -236,14 +239,17 @@ def main() -> None:
                       # active-code mask this outlines each contested superpixel
                       # individually, which is what she clicks on.
                       "inner": find_boundaries(seg, mode="inner")})
-        state["work"], state["total"], state["counts"] = {}, {}, {}
+        state["work"], state["merged"] = {}, {}
+        state["total"], state["counts"], state["present"] = {}, {}, {}
         for layer, _ in layer_specs:
             working, merged = load_layer(img_path, layer)
             if working is None:
                 continue
             state["work"][layer] = working
-            state["total"][layer] = sum(
-                count_conflicts(seg, merged, n_sp, codes[layer]).values())
+            state["merged"][layer] = merged
+            # every code this image ever had, and how many are still open
+            state["present"][layer] = count_conflicts(seg, merged, n_sp, codes[layer])
+            state["total"][layer] = sum(state["present"][layer].values())
             state["counts"][layer] = count_conflicts(seg, working, n_sp, codes[layer])
         return img, seg
 
@@ -281,6 +287,14 @@ def main() -> None:
         lyr.visible = False
         ann_layers[layer] = lyr
 
+    # Two outlines for the active conflict: bright cyan for superpixels still
+    # open, dim cyan for ones already decided — the dim ones are still clickable,
+    # so this is what tells her a decision can be changed.
+    decided_layer = viewer.add_image(
+        np.zeros(seg.shape, dtype=np.float32), name="decided (click to change)",
+        colormap=Colormap(name="cyan_dim", colors=[[0, 1, 1, 0], [0, 1, 1, 1]]),
+        blending="translucent", opacity=0.35,
+    )
     outline_layer = viewer.add_image(
         np.zeros(seg.shape, dtype=np.float32), name="active_conflict",
         colormap=Colormap(name="cyan_edge", colors=[[0, 1, 1, 0], list(OUTLINE_RGBA)]),
@@ -288,12 +302,18 @@ def main() -> None:
     )
 
     def _refresh_outline() -> None:
+        blank = np.zeros((state["H"], state["W"]), dtype=np.float32)
         if state["active"] is None:
-            outline_layer.data = np.zeros((state["H"], state["W"]), dtype=np.float32)
+            outline_layer.data = blank
+            decided_layer.data = blank.copy()
             return
         layer, code = state["active"]
-        mask = state["work"][layer] == code
-        outline_layer.data = (state["inner"] & mask).astype(np.float32)
+        work, merged, inner = (state["work"][layer], state["merged"][layer],
+                               state["inner"])
+        belongs = merged == code
+        still_open = work == code
+        outline_layer.data = (inner & still_open).astype(np.float32)
+        decided_layer.data = (inner & belongs & ~still_open).astype(np.float32)
 
     _undo: dict = {name: [] for name in ann_layers}
 
@@ -342,21 +362,27 @@ def main() -> None:
 
     def _refresh_conflicts() -> None:
         for (layer, code), btn in conflict_btns.items():
+            present = state["present"].get(layer, {}).get(code, 0)
+            btn.visible = present > 0
+            if not present:
+                continue
             left = state["counts"].get(layer, {}).get(code, 0)
-            btn.visible = left > 0
-            if left:
-                a, b = codes[layer][code]
-                mark = "▸ " if state["active"] == (layer, code) else "   "
-                btn.text = f"{mark}{code}  {class_name[a]} / {class_name[b]}   ({left})"
+            a, b = codes[layer][code]
+            mark = "▸ " if state["active"] == (layer, code) else "   "
+            tail = f"({left} left)" if left else "✓ done"
+            btn.text = f"{mark}{code}  {class_name[a]} / {class_name[b]}   {tail}"
+            btn.native.setStyleSheet(
+                "text-align:left; padding:4px 8px; font-size:11px;"
+                + ("" if left else " color:#6a6;"))
         _update_nav()
 
     def _activate(layer: str, code: int) -> None:
-        if state["counts"].get(layer, {}).get(code, 0) == 0:
+        if state["present"].get(layer, {}).get(code, 0) == 0:
             return
         state["active"] = (layer, code)
         state["paint"] = None
         for name, lyr in ann_layers.items():
-            lyr.visible = (name == layer)
+            lyr.visible = state["overlay"] and name == layer
             lyr.colormap = colormap_for(name, code if name == layer else None)
         viewer.layers.selection.active = ann_layers[layer]
         ann_layers[layer].mode = "pan_zoom"
@@ -411,27 +437,33 @@ def main() -> None:
         if not (0 <= r < state["H"] and 0 <= c < state["W"]):
             return False
         work = state["work"][layer]
-        # Only superpixels still carrying the active code may change. Agreed
-        # regions and already-settled decisions are untouchable.
-        if int(work[r, c]) != code:
+        merged = state["merged"][layer]
+        # Membership of a conflict is decided by the MERGED file, which never
+        # changes. So agreed regions and other conflicts stay untouchable, while
+        # a superpixel of THIS conflict can be re-decided as often as she likes.
+        if int(merged[r, c]) != code:
             return False
+        still_open = int(work[r, c]) == code
+        if not still_open and int(work[r, c]) == state["paint"]:
+            return False                      # already set to this class
         sid = int(state["seg"][r, c])
         new = work.copy()
         new[state["seg"] == sid] = state["paint"]
         state["work"][layer] = new
         lyr.data = to_display(new)
-        state["counts"][layer][code] -= 1
-        if state["counts"][layer][code] <= 0:
-            del state["counts"][layer][code]
-            state["active"] = None
-            resolve_a.visible = resolve_b.visible = False
-            status_label.value = "  conflict cleared — pick the next one  "
-            lyr.colormap = colormap_for(layer, None)
+        if still_open:                        # only the first decision counts
+            state["counts"][layer][code] -= 1
+            if state["counts"][layer][code] <= 0:
+                del state["counts"][layer][code]
+                status_label.value = f"  {code} complete — click any superpixel to change it  "
         _refresh_outline()
         return True
 
     def on_drag(viewer_obj, event):
-        if event.button != 1 or state["active"] is None or state["paint"] is None:
+        # Returning without setting event.handled hands the drag to napari's
+        # camera, which pans on a plain left-drag.
+        if (state["panning"] or event.button != 1
+                or state["active"] is None or state["paint"] is None):
             return
         _push_undo(state["active"][0])
         event.handled = True
@@ -549,6 +581,19 @@ def main() -> None:
         lambda _: setattr(edges_layer, "visible", not edges_layer.visible))
     items.append(edges_btn)
 
+    def _toggle_overlay() -> None:
+        # Class colours for the layer being resolved. The cyan outlines are
+        # separate layers and stay on either way.
+        state["overlay"] = not state["overlay"]
+        shown = state["active"][0] if state["active"] else None
+        for name, lyr in ann_layers.items():
+            lyr.visible = state["overlay"] and name == shown
+
+    overlay_btn = mw.PushButton(text="Toggle colour overlay")
+    overlay_btn.native.setStyleSheet("padding:2px 8px; font-size:11px;")
+    overlay_btn.changed.connect(lambda _: _toggle_overlay())
+    items.append(overlay_btn)
+
     panel = mw.Container(widgets=items, label="")
     viewer.window.add_dock_widget(panel, area="right", name="Corrector")
 
@@ -563,6 +608,15 @@ def main() -> None:
         "2", lambda _: _choose(codes[state["active"][0]][state["active"][1]][1])
         if state["active"] else None, overwrite=True)
     viewer.bind_key("Control-Z", lambda _: _do_undo(), overwrite=True)
+
+    # napari's own Space binding only switches the layer to pan_zoom mode, which
+    # these layers already are, so it cannot stop the paint handler. Replace it.
+    def _hold_to_pan(_):
+        state["panning"] = True
+        yield
+        state["panning"] = False
+
+    viewer.bind_key("Space", _hold_to_pan, overwrite=True)
     viewer.bind_key("Left",  lambda _: _goto((state["idx"] - 1) % n), overwrite=True)
     viewer.bind_key("Right", lambda _: _goto((state["idx"] + 1) % n), overwrite=True)
 
